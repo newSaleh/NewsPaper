@@ -1,6 +1,6 @@
 name: Daily Asharq Al-Awsat PDF to Telegram
 
-on:
+"on":
   schedule:
     # الساعة 22:30 UTC = 1:30 صباحًا بتوقيت السعودية (UTC+3)
     - cron: "30 22 * * *"
