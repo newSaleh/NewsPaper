@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """
-متابعة رسائل بوت Telegram: أي رسالة يرسلها المستخدم (أي نص كان) تجعل
-البوت يعرض قائمة بآخر 10 أيام (اليوم + 9 أيام سابقة) ليختار المستخدم
-يومًا منها، ويرسل عدد ذلك اليوم عند اختياره.
+متابعة رسائل بوت Telegram: أي رسالة نصية عادية من المستخدم تجعل البوت
+يردّ بقائمة نصية مرقّمة من 1 إلى 10 (اليوم + 9 أيام سابقة)، وعندما يرد
+المستخدم برقم من هذه القائمة يرسل له البوت عدد ذلك اليوم.
 
 يعمل بأسلوب "الاستطلاع" (polling): يُستدعى دوريًا عبر GitHub Actions
 (كل بضع دقائق)، يفحص الرسائل الجديدة عبر getUpdates، يردّ عليها، ثم
 يحفظ آخر update_id تمت معالجته في bot_state.json حتى لا تُعاد معالجة
 نفس الرسائل في المرة القادمة.
+
+لا حاجة لتذكّر أي "حالة محادثة" بين رسالة القائمة ورد الرقم: الرقم N
+يقابل دائمًا (تاريخ اليوم - (N-1) يوم) وقت وصول الرد، وهذا وحده كافٍ
+لحساب التاريخ الصحيح دون تخزين إضافي.
 
 لا يعتمد على الخطة البديلة عبر Playwright عمدًا (لإبقاء هذا الفحص
 الدوري سريعًا وخفيفًا)؛ يعتمد فقط على رابط التحميل المباشر. القائمة
@@ -33,7 +37,7 @@ ARABIC_WEEKDAYS_BY_PY_WEEKDAY = [
     "الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت", "الأحد",
 ]
 
-LIST_PROMPT = "اختر اليوم الذي تريد إرسال عدده:"
+ARABIC_INDIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
 
 
 def load_state() -> dict:
@@ -53,30 +57,30 @@ def api_url(method: str) -> str:
     return f"https://api.telegram.org/bot{token}/{method}"
 
 
-def build_recent_days_keyboard() -> dict:
+def date_for_position(position: int, today: datetime.date) -> datetime.date:
+    return today - datetime.timedelta(days=position - 1)
+
+
+def format_day_label(position: int, d: datetime.date) -> str:
+    date_str = d.strftime("%d-%m-%Y")
+    if position == 1:
+        return f"اليوم {date_str}"
+    weekday = ARABIC_WEEKDAYS_BY_PY_WEEKDAY[d.weekday()]
+    return f"{weekday} {date_str}"
+
+
+def build_recent_days_list_text() -> str:
     today = datetime.datetime.now(SAUDI_TZ).date()
-    rows = []
-    for i in range(RECENT_DAYS_COUNT):
-        d = today - datetime.timedelta(days=i)
-        weekday = ARABIC_WEEKDAYS_BY_PY_WEEKDAY[d.weekday()]
-        label = f"{'اليوم - ' if i == 0 else ''}{d.isoformat()} ({weekday})"
-        rows.append([{"text": label, "callback_data": f"day:{d.isoformat()}"}])
-    return {"inline_keyboard": rows}
+    lines = ["اختر رقم اليوم الذي تريد إرسال عدده، وأرسل الرقم فقط:"]
+    for position in range(1, RECENT_DAYS_COUNT + 1):
+        d = date_for_position(position, today)
+        lines.append(f"{position}. {format_day_label(position, d)}")
+    return "\n".join(lines)
 
 
-def send_message(chat_id, text: str, reply_markup: dict | None = None) -> dict:
-    data = {"chat_id": chat_id, "text": text}
-    if reply_markup:
-        data["reply_markup"] = json.dumps(reply_markup)
-    r = requests.post(api_url("sendMessage"), data=data, timeout=30)
+def send_message(chat_id, text: str) -> dict:
+    r = requests.post(api_url("sendMessage"), data={"chat_id": chat_id, "text": text}, timeout=30)
     return r.json()
-
-
-def answer_callback(callback_id: str, text: str | None = None) -> None:
-    data = {"callback_query_id": callback_id}
-    if text:
-        data["text"] = text
-    requests.post(api_url("answerCallbackQuery"), data=data, timeout=30)
 
 
 def send_document(chat_id, file_path: str, caption: str) -> None:
@@ -104,32 +108,24 @@ def handle_day_selection(chat_id, target_date: datetime.date) -> None:
 
 
 def handle_update(update: dict, allowed_chat_id: str) -> None:
-    if "message" in update:
-        msg = update["message"]
-        chat_id = msg["chat"]["id"]
-        if str(chat_id) != str(allowed_chat_id):
-            return
-        # أي رسالة نصية على الإطلاق (بغض النظر عن محتواها) تعرض قائمة الأيام.
-        if msg.get("text"):
-            keyboard = build_recent_days_keyboard()
-            send_message(chat_id, LIST_PROMPT, keyboard)
+    if "message" not in update:
         return
 
-    if "callback_query" in update:
-        cq = update["callback_query"]
-        chat_id = cq["message"]["chat"]["id"]
-        data = cq.get("data", "")
+    msg = update["message"]
+    chat_id = msg["chat"]["id"]
+    if str(chat_id) != str(allowed_chat_id):
+        return
 
-        if str(chat_id) != str(allowed_chat_id):
-            answer_callback(cq["id"])
-            return
+    text = (msg.get("text") or "").strip().translate(ARABIC_INDIC_DIGITS)
+    if not text:
+        return
 
-        if data.startswith("day:"):
-            date_str = data.split(":", 1)[1]
-            target_date = datetime.date.fromisoformat(date_str)
-            answer_callback(cq["id"], text="جارٍ التحميل، الرجاء الانتظار...")
-            handle_day_selection(chat_id, target_date)
-            return
+    if text.isdigit() and 1 <= int(text) <= RECENT_DAYS_COUNT:
+        today = datetime.datetime.now(SAUDI_TZ).date()
+        target_date = date_for_position(int(text), today)
+        handle_day_selection(chat_id, target_date)
+    else:
+        send_message(chat_id, build_recent_days_list_text())
 
 
 def main() -> None:
