@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-متابعة أوامر بوت Telegram: يعرض تقويمًا لاختيار تاريخ من الأشهر السابقة
-ويرسل عدد ذلك اليوم عند اختياره.
+متابعة أوامر بوت Telegram: يعرض قائمة بآخر 10 أيام (اليوم + 9 أيام
+سابقة) ليختار المستخدم يومًا منها، ويرسل عدد ذلك اليوم عند اختياره.
 
 يعمل بأسلوب "الاستطلاع" (polling): يُستدعى دوريًا عبر GitHub Actions
 (كل بضع دقائق)، يفحص الرسائل الجديدة عبر getUpdates، يردّ عليها، ثم
@@ -9,10 +9,11 @@
 نفس الرسائل في المرة القادمة.
 
 لا يعتمد على الخطة البديلة عبر Playwright عمدًا (لإبقاء هذا الفحص
-الدوري سريعًا وخفيفًا)؛ يعتمد فقط على رابط التحميل المباشر.
+الدوري سريعًا وخفيفًا)؛ يعتمد فقط على رابط التحميل المباشر. القائمة
+محصورة بآخر 10 أيام لأن الأعداد الأقدم من ذلك تُحذف من موقع الشرق
+الأوسط (تم التحقق من ذلك فعليًا).
 """
 
-import calendar
 import datetime
 import json
 import os
@@ -25,14 +26,13 @@ import download_and_send as dl
 
 STATE_FILE = "bot_state.json"
 SAUDI_TZ = ZoneInfo("Asia/Riyadh")
+RECENT_DAYS_COUNT = 10
 
-ARABIC_MONTHS = [
-    "", "يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو",
-    "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر",
+ARABIC_WEEKDAYS_BY_PY_WEEKDAY = [
+    "الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت", "الأحد",
 ]
-ARABIC_WEEKDAYS = ["أحد", "اثنين", "ثلاثاء", "أربعاء", "خميس", "جمعة", "سبت"]
 
-CALENDAR_PROMPT = "اختر تاريخ العدد الذي تريد إرساله:"
+LIST_PROMPT = "اختر اليوم الذي تريد إرسال عدده:"
 
 
 def load_state() -> dict:
@@ -52,37 +52,14 @@ def api_url(method: str) -> str:
     return f"https://api.telegram.org/bot{token}/{method}"
 
 
-def build_calendar_keyboard(year: int, month: int) -> dict:
+def build_recent_days_keyboard() -> dict:
     today = datetime.datetime.now(SAUDI_TZ).date()
-    cal = calendar.Calendar(firstweekday=6)  # الأسبوع يبدأ بالأحد
-    weeks = cal.monthdayscalendar(year, month)
-
-    rows = [
-        [{"text": f"{ARABIC_MONTHS[month]} {year}", "callback_data": "noop"}],
-        [{"text": d, "callback_data": "noop"} for d in ARABIC_WEEKDAYS],
-    ]
-
-    for week in weeks:
-        row = []
-        for day in week:
-            if day == 0:
-                row.append({"text": " ", "callback_data": "noop"})
-                continue
-            d = datetime.date(year, month, day)
-            if d > today:
-                row.append({"text": "·", "callback_data": "noop"})
-            else:
-                row.append({"text": str(day), "callback_data": f"day:{d.isoformat()}"})
-        rows.append(row)
-
-    prev_month, prev_year = (12, year - 1) if month == 1 else (month - 1, year)
-    next_month, next_year = (1, year + 1) if month == 12 else (month + 1, year)
-
-    nav_row = [{"text": "« الشهر السابق", "callback_data": f"nav:{prev_year}:{prev_month}"}]
-    if (next_year, next_month) <= (today.year, today.month):
-        nav_row.append({"text": "الشهر التالي »", "callback_data": f"nav:{next_year}:{next_month}"})
-    rows.append(nav_row)
-
+    rows = []
+    for i in range(RECENT_DAYS_COUNT):
+        d = today - datetime.timedelta(days=i)
+        weekday = ARABIC_WEEKDAYS_BY_PY_WEEKDAY[d.weekday()]
+        label = f"{'اليوم - ' if i == 0 else ''}{d.isoformat()} ({weekday})"
+        rows.append([{"text": label, "callback_data": f"day:{d.isoformat()}"}])
     return {"inline_keyboard": rows}
 
 
@@ -92,13 +69,6 @@ def send_message(chat_id, text: str, reply_markup: dict | None = None) -> dict:
         data["reply_markup"] = json.dumps(reply_markup)
     r = requests.post(api_url("sendMessage"), data=data, timeout=30)
     return r.json()
-
-
-def edit_message(chat_id, message_id, text: str, reply_markup: dict | None = None) -> None:
-    data = {"chat_id": chat_id, "message_id": message_id, "text": text}
-    if reply_markup:
-        data["reply_markup"] = json.dumps(reply_markup)
-    requests.post(api_url("editMessageText"), data=data, timeout=30)
 
 
 def answer_callback(callback_id: str, text: str | None = None) -> None:
@@ -140,29 +110,16 @@ def handle_update(update: dict, allowed_chat_id: str) -> None:
             return
         text = msg.get("text", "").strip()
         if text in ("/date", "/تاريخ", "/start"):
-            today = datetime.datetime.now(SAUDI_TZ).date()
-            keyboard = build_calendar_keyboard(today.year, today.month)
-            send_message(chat_id, CALENDAR_PROMPT, keyboard)
+            keyboard = build_recent_days_keyboard()
+            send_message(chat_id, LIST_PROMPT, keyboard)
         return
 
     if "callback_query" in update:
         cq = update["callback_query"]
         chat_id = cq["message"]["chat"]["id"]
-        message_id = cq["message"]["message_id"]
         data = cq.get("data", "")
 
         if str(chat_id) != str(allowed_chat_id):
-            answer_callback(cq["id"])
-            return
-
-        if data == "noop":
-            answer_callback(cq["id"])
-            return
-
-        if data.startswith("nav:"):
-            _, year, month = data.split(":")
-            keyboard = build_calendar_keyboard(int(year), int(month))
-            edit_message(chat_id, message_id, CALENDAR_PROMPT, keyboard)
             answer_callback(cq["id"])
             return
 
