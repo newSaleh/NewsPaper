@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-متابعة أوامر بوت Telegram: يعرض قائمة بآخر 10 أيام (اليوم + 9 أيام
-سابقة) ليختار المستخدم يومًا منها، ويرسل عدد ذلك اليوم عند اختياره.
+متابعة رسائل بوت Telegram: أي رسالة يرسلها المستخدم (أي نص كان) تجعل
+البوت يعرض قائمة بآخر 10 أيام (اليوم + 9 أيام سابقة) ليختار المستخدم
+يومًا منها، ويرسل عدد ذلك اليوم عند اختياره.
 
 يعمل بأسلوب "الاستطلاع" (polling): يُستدعى دوريًا عبر GitHub Actions
 (كل بضع دقائق)، يفحص الرسائل الجديدة عبر getUpdates، يردّ عليها، ثم
@@ -108,8 +109,8 @@ def handle_update(update: dict, allowed_chat_id: str) -> None:
         chat_id = msg["chat"]["id"]
         if str(chat_id) != str(allowed_chat_id):
             return
-        text = msg.get("text", "").strip()
-        if text in ("/date", "/تاريخ", "/start"):
+        # أي رسالة نصية على الإطلاق (بغض النظر عن محتواها) تعرض قائمة الأيام.
+        if msg.get("text"):
             keyboard = build_recent_days_keyboard()
             send_message(chat_id, LIST_PROMPT, keyboard)
         return
